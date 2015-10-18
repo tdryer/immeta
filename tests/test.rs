@@ -32,6 +32,11 @@ fn test_jpeg() {
 }
 
 #[test]
+fn test_jpeg_exif() {
+    let md = immeta::load_from_file("tests/images/flower.jpg").unwrap();
+}
+
+#[test]
 fn test_png() {
     let md = immeta::load_from_file("tests/images/owlet.png").unwrap();
 
