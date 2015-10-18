@@ -1,7 +1,7 @@
 extern crate immeta;
 
 use immeta::Dimensions;
-use immeta::formats::{png, gif};
+use immeta::formats::{png, gif, jpeg};
 use immeta::markers::{Png, Gif, Jpeg, Webp};
 
 const OWLET_DIM: Dimensions = Dimensions {
@@ -34,6 +34,11 @@ fn test_jpeg() {
 #[test]
 fn test_jpeg_exif() {
     let md = immeta::load_from_file("tests/images/flower.jpg").unwrap();
+    assert_eq!(md.mime_type(), "image/jpeg");
+    let md = md.into::<Jpeg>().ok().expect("not JPEG metadata");
+    assert_eq!(md.dimensions, Dimensions { width: 480, height: 360 });
+    assert_eq!(md.orientation, jpeg::Orientation::Normal);
+
 }
 
 #[test]

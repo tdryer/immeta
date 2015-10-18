@@ -51,13 +51,13 @@ pub enum Orientation {
     // 8 rotate 270
     // *
 
-    // 1 = Horizontal (normal) 
-    // 2 = Mirror horizontal 
-    // 3 = Rotate 180 
-    // 4 = Mirror vertical 
-    // 5 = Mirror horizontal and rotate 270 CW 
-    // 6 = Rotate 90 CW 
-    // 7 = Mirror horizontal and rotate 90 CW 
+    // 1 = Horizontal (normal)
+    // 2 = Mirror horizontal
+    // 3 = Rotate 180
+    // 4 = Mirror vertical
+    // 5 = Mirror horizontal and rotate 270 CW
+    // 6 = Rotate 90 CW
+    // 7 = Mirror horizontal and rotate 90 CW
     // 8 = Rotate 270 CW
 }
 
@@ -91,7 +91,7 @@ enum IfdValue {
     // TODO: fix rationals
     Rational(u32, u32),
     Undefined(u8),
-    SignedLong(i32),
+    //SignedLong(i32),
     //SignedRational(Ratio<i32>),
 }
 
@@ -107,14 +107,12 @@ struct IfdField {
 }
 
 impl IfdField {
-    fn load_all<R: ?Sized + Read>(
-        r: &mut BufReader<&mut R>, offset: &mut usize
-    ) -> Result<Vec<IfdField>> {
+    fn load_all(r: &mut Cursor<Vec<u8>>, offset: &mut usize) -> Result<Vec<IfdField>> {
         let mut fields = vec![];
         let mut data_offsets: HashMap<u32, (u16, u16, u32)> = HashMap::new();
         let num_fields = try_if_eof!(r.read_u16::<LittleEndian>(), "while reading num_fields");
         *offset += 2;
-        for field_num in 0..num_fields {
+        for _ in 0..num_fields {
 
             // identifies the field
             // first one seems to be "make"
@@ -158,7 +156,7 @@ impl IfdField {
                     return Err(unexpected_eof!("while reading value"));
                 }
                 let mut values_cursor = Cursor::new(&values_data as &[u8]);
-                for i in 0..count_2 {
+                for _ in 0..count_2 {
                     values.push(match tag_type {
                         // TODO: implement other types
                         1 => IfdValue::Byte(try!(values_cursor.read_u8())),
@@ -187,9 +185,9 @@ impl IfdField {
         for (data_offset, &(tag, tag_type, count)) in sorted_data_offsets {
             println!("offset: {}", offset);
             println!("data offset: {}", data_offset);
-            let empty_space = *data_offset as usize - *offset;
+            let empty_space = *data_offset as i32 - *offset as i32;
             if empty_space > 0 {
-                for i in 0..empty_space {
+                for _ in 0..empty_space {
                     try!(r.read_u8());
                     *offset += 1;
                 }
@@ -200,7 +198,7 @@ impl IfdField {
             //    return Err(invalid_format!("hole in data"));
             //}
             let mut values = vec![];
-            for i in 0..count {
+            for _ in 0..count {
                 let res = match tag_type {
                     // TODO: implement other types
                     // TODO: need to count offset
@@ -236,7 +234,7 @@ struct TiffHeader {
 }
 
 impl TiffHeader {
-    fn load<R: ?Sized + Read>(r: &mut BufReader<&mut R>) -> Result<TiffHeader> {
+    fn load(r: &mut Cursor<Vec<u8>>) -> Result<TiffHeader> {
         let byte_order = try_if_eof!(r.read_u16::<LittleEndian>(),
                                      "while reading byte order");
         // TODO: use specified byte order
@@ -259,27 +257,8 @@ impl TiffHeader {
     }
 }
 
-#[derive(Debug)]
-enum ExifTag {
-    Orientation,
-    ResolutionUnit,
-    ExifIfdPointer,
-}
-
-impl ExifTag {
-    fn from_u16(tag: u16) -> Option<ExifTag> {
-        println!("parsing tag 0x{:x}", tag);
-        match tag {
-            0x112 => Some(ExifTag::Orientation),
-            0x128 => Some(ExifTag::ResolutionUnit),
-            0x8769 => Some(ExifTag::ExifIfdPointer),
-            _ => None
-        }
-    }
-}
-
 impl ExifSection {
-    fn load<R: ?Sized + Read>(r: &mut BufReader<&mut R>) -> Result<ExifSection> {
+    fn load(r: &mut Cursor<Vec<u8>>) -> Result<ExifSection> {
         let mut identifier_code = [0u8; 6];
         if try!(r.read_exact_0(&mut identifier_code)) != identifier_code.len() {
             return Err(unexpected_eof!("while reading identifier code in exif segment"));
@@ -335,19 +314,25 @@ impl LoadableMetadata for Metadata {
                 try_if_eof!(r.read_u16::<BigEndian>(), "when reading marker payload size") - 2
             } else { 0 };
 
+            // Read entire segment into buffer with cursor.
+            let mut buffer = Vec::with_capacity(size as usize);
+            try!(r.take(size as u64).read_to_end(&mut buffer));
+            let mut segment = Cursor::new(buffer);
+
             match marker_type {
                 0xc0 | 0xc2 => {  // maybe others?
                     println!("found dimensions");
                     // skip one byte
-                    let _ = try_if_eof!(r.read_u8(), "when skipping to dimensions data");
-                    let h = try_if_eof!(r.read_u16::<BigEndian>(), "when reading height");
-                    let w = try_if_eof!(r.read_u16::<BigEndian>(), "when reading width");
+                    let _ = try_if_eof!(segment.read_u8(), "when skipping to dimensions data");
+                    let h = try_if_eof!(segment.read_u16::<BigEndian>(), "when reading height");
+                    let w = try_if_eof!(segment.read_u16::<BigEndian>(), "when reading width");
                     dimensions = Some((w, h));
                 }
                 0xe1 => {  // APP1 segment (sometimes exif)
                     println!("found exif");
+
                     // TODO: remove unwrap
-                    let exif_section = ExifSection::load(r).unwrap();
+                    let exif_section = ExifSection::load(&mut segment).unwrap();
                     for ifd_field in exif_section.zeroth_ifd {
                         // TODO: figure out how to make this matching better
                         match ifd_field.id {
@@ -375,13 +360,6 @@ impl LoadableMetadata for Metadata {
                 }
                 _ => ()
             };
-
-            let size = size as u64;
-            if try!(r.skip_exact(size)) != size {
-                println!("failed to skip payload");
-                return Err(unexpected_eof!("when skipping marker payload"));
-            }
-            println!("skipped payload");
         }
         Ok(Metadata {
             dimensions: dimensions.unwrap().into(),
