@@ -37,48 +37,28 @@ pub struct Metadata {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Orientation {
+    Normal,
+    MirrorHorizontal,
+    Rotate180,
+    FlipVertical,
+    Transpose,
+    Rotate90,
+    Transverse,
+    Rotate270,
     Unspecified,
-    Normal, // 1
-    FlippedHorizontally, // 2
-    Rotated180,  // 3
-    Rotated180FlippedHorizontally, // 4
-    RotatedCWFippedHorizontally, // 5
-    RotatedCCW, // 6
-    RotatedCCWFippedHorizontally, // 7
-    RotatedCW, // 8
-
-    // TODO: better names? exiftool seems to have some
-    // 1
-    // 2 flip horizontal
-    // 3 rotate 180
-    // 4 flip vertical
-    // 5 transpose
-    // 6 rotate 90
-    // 7 transverse
-    // 8 rotate 270
-    // *
-
-    // 1 = Horizontal (normal)
-    // 2 = Mirror horizontal
-    // 3 = Rotate 180
-    // 4 = Mirror vertical
-    // 5 = Mirror horizontal and rotate 270 CW
-    // 6 = Rotate 90 CW
-    // 7 = Mirror horizontal and rotate 90 CW
-    // 8 = Rotate 270 CW
 }
 
 impl Orientation {
     fn new(orientation: u16) -> Orientation {
         match orientation {
             1 => Orientation::Normal,
-            2 => Orientation::FlippedHorizontally,
-            3 => Orientation::Rotated180,
-            4 => Orientation::Rotated180FlippedHorizontally,
-            5 => Orientation::RotatedCWFippedHorizontally,
-            6 => Orientation::RotatedCCW,
-            7 => Orientation::RotatedCCWFippedHorizontally,
-            8 => Orientation::RotatedCW,
+            2 => Orientation::MirrorHorizontal,
+            3 => Orientation::Rotate180,
+            4 => Orientation::FlipVertical,
+            5 => Orientation::Transpose,
+            6 => Orientation::Rotate90,
+            7 => Orientation::Transverse,
+            8 => Orientation::Rotate270,
             _ => Orientation::Unspecified,
         }
     }
