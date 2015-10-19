@@ -25,6 +25,13 @@ pub struct Metadata {
     pub dimensions: Dimensions,
     /// Image orientation.
     pub orientation: Orientation,
+    /// File change date and time.
+    // TODO: parse this
+    pub date_time: Option<String>,
+    /// Image input equipment manufacturer.
+    pub make: Option<String>,
+    /// Image input equipment model.
+    pub model: Option<String>,
     // TODO: something else?
 }
 
@@ -79,94 +86,117 @@ impl Orientation {
 
 #[derive(Debug)]
 struct ExifSection {
-    zeroth_ifd: Vec<IfdField>,
+    zeroth_ifd: Vec<Tag>,
+}
+
+#[derive(Clone,Debug)]
+enum TagDatatype {
+    Byte,
+    Ascii,
+    Short,
+    Long,
+    Rational,
+    Undefined,
+    SignedLong,
+    SignedRational,
+}
+
+impl TagDatatype {
+    fn new(datatype: u16) -> Result<TagDatatype> {
+        match datatype {
+            1 => Ok(TagDatatype::Byte),
+            2 => Ok(TagDatatype::Ascii),
+            3 => Ok(TagDatatype::Short),
+            4 => Ok(TagDatatype::Long),
+            5 => Ok(TagDatatype::Rational),
+            7 => Ok(TagDatatype::Undefined),
+            9 => Ok(TagDatatype::SignedLong),
+            10 => Ok(TagDatatype::SignedRational),
+            _ => Err(invalid_format!("invalid tag datatype: {}", datatype))
+        }
+    }
+
+    fn len(self: &TagDatatype) -> usize {
+        match *self {
+            TagDatatype::Byte => 1,
+            TagDatatype::Ascii => 1,
+            TagDatatype::Short => 2,
+            TagDatatype::Long => 4,
+            TagDatatype::Rational => 8,
+            TagDatatype::Undefined => 1,
+            TagDatatype::SignedLong => 4,
+            TagDatatype::SignedRational => 8,
+        }
+    }
 }
 
 #[derive(Debug)]
-enum IfdValue {
-    Byte(u8),
-    Ascii(u8),
-    Short(u16),
-    Long(u32),
-    // TODO: fix rationals
-    Rational(u32, u32),
-    Undefined(u8),
-    //SignedLong(i32),
-    //SignedRational(Ratio<i32>),
-}
-
-//fn load_value_vector<R: ?Sized + Read>(r: &mut BufReader<&mut R>, ) {
-//
-//}
-
-#[derive(Debug)]
-struct IfdField {
+struct Tag {
     id: u16,
-    // TODO: this doesn't express that the list is limited to a single type
-    value: Vec<IfdValue>,
+    datatype: TagDatatype,
+    data: Vec<u8>,
 }
 
-impl IfdField {
-    fn load_all(r: &mut Cursor<Vec<u8>>, offset: &mut usize) -> Result<Vec<IfdField>> {
+impl Tag {
+    fn new(id: u16, datatype: TagDatatype, data: Vec<u8>) -> Tag {
+        Tag { id: id, datatype: datatype, data: data }
+    }
+
+    fn get_short(self: &Tag) -> Result<u16> {
+        let mut c: &[u8] = &self.data;
+        match (&self.datatype, self.data.len()) {
+            // TODO: use correct byte order
+            (&TagDatatype::Short, 2) => Ok(try_if_eof!(c.read_u16::<LittleEndian>(),
+                                                       "this should never happen")),
+            _ => Err(invalid_format!("tag has invalid datatype or count"))
+        }
+    }
+
+    fn get_ascii(self: &Tag) -> Result<String> {
+        let mut new_data = self.data.clone();
+        // Remove trailing null from string.
+        new_data.pop();
+        match self.datatype {
+            TagDatatype::Ascii => (String::from_utf8(new_data)
+                                   .or(Err(invalid_format!("invalid string")))),
+            _ => Err(invalid_format!("tag has invalid datatype"))
+        }
+    }
+
+    fn load_all(r: &mut Cursor<Vec<u8>>, offset: &mut usize) -> Result<Vec<Tag>> {
         let mut fields = vec![];
-        let mut data_offsets: HashMap<u32, (u16, u16, u32)> = HashMap::new();
+        let mut data_offsets: HashMap<u32, (u16, TagDatatype, usize)> = HashMap::new();
         let num_fields = try_if_eof!(r.read_u16::<LittleEndian>(), "while reading num_fields");
         *offset += 2;
         for _ in 0..num_fields {
 
             // identifies the field
             // first one seems to be "make"
-            let tag = try_if_eof!(r.read_u16::<LittleEndian>(),
+            let tag_id = try_if_eof!(r.read_u16::<LittleEndian>(),
                                   "while reading tag");
             // the field value type
-            let tag_type = try_if_eof!(r.read_u16::<LittleEndian>(),
-                                       "while reading tag_type");
+            //let tag_type = try_if_eof!(r.read_u16::<LittleEndian>(),
+            //                           "while reading tag_type");
+            let tag_datatype = try!(TagDatatype::new(try_if_eof!(r.read_u16::<LittleEndian>(), "while reading tag_type")));
             // the number of values in the field
             let count_2 = try_if_eof!(r.read_u32::<LittleEndian>(),
-                                      "while reading count_2");
+                                      "while reading count_2") as usize;
 
             // next 4 bytes is either offset to value position, or the value itself, if it fits within
             // 4 bytes.
-            let type_len = match tag_type {
-                1 => 1, // byte
-                2 => 1, // ascii
-                3 => 2, // short
-                4 => 4, // long
-                5 => 8, // rational
-                7 => 1, // undefined
-                9 => 4, // slong
-                10 => 8, // srational
-                _ => { // unknown
-                    //return Err("unknown tag type");
-                    // TODO: make this raise error
-                    8
-                }
-            };
+            let type_len = tag_datatype.len();
 
             // TODO: try_or_eof these
             if type_len * count_2 > 4 {
                 // make note to read data later
                 data_offsets.insert(try!(r.read_u32::<LittleEndian>()),
-                                    (tag, tag_type, count_2));
+                                    (tag_id, tag_datatype, count_2));
             } else {
                 // read all values now
-                let mut values = vec![];
-                let mut values_data = [0u8; 4];
-                if try!(r.read_exact_0(&mut values_data)) != values_data.len() {
-                    return Err(unexpected_eof!("while reading value"));
-                }
-                let mut values_cursor = Cursor::new(&values_data as &[u8]);
-                for _ in 0..count_2 {
-                    values.push(match tag_type {
-                        // TODO: implement other types
-                        1 => IfdValue::Byte(try!(values_cursor.read_u8())),
-                        2 => IfdValue::Ascii(try!(values_cursor.read_u8())),
-                        3 => IfdValue::Short(try!(values_cursor.read_u16::<LittleEndian>())),
-                        4 => IfdValue::Long(try!(values_cursor.read_u32::<LittleEndian>())),
-                        _ => IfdValue::Undefined(0)
-                    });
-                }
-                fields.push(IfdField { id: tag, value: values });
+                let mut values_data = Vec::with_capacity(4);
+                try!(r.take(4).read_to_end(&mut values_data));
+                values_data.truncate(type_len);
+                fields.push(Tag::new(tag_id, tag_datatype, values_data));
             }
             *offset += 12;
         }
@@ -176,13 +206,13 @@ impl IfdField {
         println!("first_ifd_offset: {}", first_ifd_offset);
         *offset += 4;
 
-        // TODO: read values from data section
+        // read values from data section
         println!("offsets: {:?}", data_offsets);
         println!("offset: {:?}", offset);
         //let sorted_data_offsets: Vec<_> = data_offsets.iter().collect().sort();
         let mut sorted_data_offsets: Vec<_> = data_offsets.iter().collect();
-        sorted_data_offsets.sort();
-        for (data_offset, &(tag, tag_type, count)) in sorted_data_offsets {
+        sorted_data_offsets.sort_by(|&(offset_a, _), &(offset_b, _)| offset_a.cmp(offset_b));
+        for (data_offset, &(tag, ref tag_datatype, count)) in sorted_data_offsets {
             println!("offset: {}", offset);
             println!("data offset: {}", data_offset);
             let empty_space = *data_offset as i32 - *offset as i32;
@@ -197,24 +227,12 @@ impl IfdField {
             //if *offset != *data_offset as usize {
             //    return Err(invalid_format!("hole in data"));
             //}
-            let mut values = vec![];
-            for _ in 0..count {
-                let res = match tag_type {
-                    // TODO: implement other types
-                    // TODO: need to count offset
-                    1 => Ok((IfdValue::Byte(try!(r.read_u8())), 1)),
-                    2 => Ok((IfdValue::Ascii(try!(r.read_u8())), 1)),
-                    3 => Ok((IfdValue::Short(try!(r.read_u16::<LittleEndian>())), 2)),
-                    4 => Ok((IfdValue::Long(try!(r.read_u32::<LittleEndian>())), 4)),
-                    5 => Ok((IfdValue::Rational(try!(r.read_u32::<LittleEndian>()),
-                                                try!(r.read_u32::<LittleEndian>())), 8)),
-                    x => Err(format!("invalid tag type: {}", x))
-                };
-                let (ifd_value, length) = res.unwrap();
-                values.push(ifd_value);
-                *offset += length;
-            }
-            fields.push(IfdField { id: tag, value: values });
+
+            let data_len = tag_datatype.len() * count;
+            let mut data = Vec::with_capacity(data_len as usize);
+            try!(r.take(data_len as u64).read_to_end(&mut data));
+            *offset += data_len;
+            fields.push(Tag::new(tag, tag_datatype.clone(), data));
         }
 
         Ok(fields)
@@ -279,7 +297,7 @@ impl ExifSection {
 
         // 0th image file directory (IFD)
 
-        let fields = try!(IfdField::load_all(r, &mut offset));
+        let fields = try!(Tag::load_all(r, &mut offset));
         println!("fields: {:?}", fields);
 
         // TODO: handle other IFDs
@@ -295,6 +313,9 @@ impl LoadableMetadata for Metadata {
         let mut r = &mut BufReader::new(r);
         let mut dimensions = None;
         let mut orientation = Orientation::Unspecified;
+        let mut date_time = None;
+        let mut make = None;
+        let mut model = None;
         loop {
             if try!(r.skip_until(0xff)) == 0 {
                 println!("failed to skip until marker");
@@ -334,23 +355,12 @@ impl LoadableMetadata for Metadata {
                     // TODO: remove unwrap
                     let exif_section = ExifSection::load(&mut segment).unwrap();
                     for ifd_field in exif_section.zeroth_ifd {
-                        // TODO: figure out how to make this matching better
                         match ifd_field.id {
-                            0x112 => {
-                                if ifd_field.value.len() == 1 {
-                                    match ifd_field.value[0] {
-                                        IfdValue::Short(n) => {
-                                            orientation = Orientation::new(n);
-                                            println!("orientation: {:?}", orientation);
-                                        }
-                                        _ => { }
-                                    }
-                                }
-                            }
-                            //306 => {
-
-                            //}
-                            _ => { }
+                            0x112 => { orientation = Orientation::new(try!(ifd_field.get_short())); },
+                            306 => { date_time = Some(try!(ifd_field.get_ascii())); },
+                            271 => { make = Some(try!(ifd_field.get_ascii())); },
+                            272 => { model = Some(try!(ifd_field.get_ascii())); },
+                            x => { println!("unknown tag id: {}", x); }
                         }
 
                     }
@@ -364,6 +374,9 @@ impl LoadableMetadata for Metadata {
         Ok(Metadata {
             dimensions: dimensions.unwrap().into(),
             orientation: orientation,
+            date_time: date_time,
+            make: make,
+            model: model,
         })
     }
 }

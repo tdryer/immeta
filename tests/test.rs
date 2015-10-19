@@ -38,7 +38,9 @@ fn test_jpeg_exif() {
     let md = md.into::<Jpeg>().ok().expect("not JPEG metadata");
     assert_eq!(md.dimensions, Dimensions { width: 480, height: 360 });
     assert_eq!(md.orientation, jpeg::Orientation::Normal);
-
+    assert_eq!(md.date_time, Some("2003:12:14 12:01:44".to_string()));
+    assert_eq!(md.make, Some("Canon".to_string()));
+    assert_eq!(md.model, Some("Canon PowerShot S40".to_string()));
 }
 
 #[test]
