@@ -9,12 +9,26 @@
 use std::io::{BufReader, Read, Cursor};
 use std::collections::HashMap;
 
+use byteorder;
 use byteorder::{ReadBytesExt, BigEndian, LittleEndian};
 
 use types::{Result, Dimensions};
 use traits::LoadableMetadata;
 use utils::{ReadExt, BufReadExt};
-//use num::rational::Ratio;
+
+fn read_u16<R: Read>(byte_order: ByteOrder, buf: &mut R) -> byteorder::Result<u16> {
+    match byte_order {
+        ByteOrder::LittleEndian => buf.read_u16::<LittleEndian>(),
+        ByteOrder::BigEndian => buf.read_u16::<BigEndian>(),
+    }
+}
+
+fn read_u32<R: Read>(byte_order: ByteOrder, buf: &mut R) -> byteorder::Result<u32> {
+    match byte_order {
+        ByteOrder::LittleEndian => buf.read_u32::<LittleEndian>(),
+        ByteOrder::BigEndian => buf.read_u32::<BigEndian>(),
+    }
+}
 
 /// Represents metadata of a JPEG image.
 ///
@@ -115,19 +129,19 @@ struct Tag {
     id: u16,
     datatype: TagDatatype,
     data: Vec<u8>,
+    byte_order: ByteOrder,
 }
 
 impl Tag {
-    fn new(id: u16, datatype: TagDatatype, data: Vec<u8>) -> Tag {
-        Tag { id: id, datatype: datatype, data: data }
+    fn new(id: u16, datatype: TagDatatype, data: Vec<u8>, byte_order: ByteOrder) -> Tag {
+        Tag { id: id, datatype: datatype, data: data, byte_order: byte_order }
     }
 
     fn get_short(self: &Tag) -> Result<u16> {
         let mut c: &[u8] = &self.data;
         match (&self.datatype, self.data.len()) {
-            // TODO: use correct byte order
-            (&TagDatatype::Short, 2) => Ok(try_if_eof!(c.read_u16::<LittleEndian>(),
-                                                       "this should never happen")),
+            (&TagDatatype::Short, 2) => Ok(try_if_eof!(read_u16(self.byte_order, &mut c),
+                                           "this should never happen")),
             _ => Err(invalid_format!("tag has invalid datatype or count"))
         }
     }
@@ -143,24 +157,27 @@ impl Tag {
         }
     }
 
-    fn load_all(r: &mut Cursor<Vec<u8>>, offset: &mut usize) -> Result<Vec<Tag>> {
+    fn load_all(r: &mut Cursor<Vec<u8>>, offset: &mut usize, byte_order: ByteOrder)
+            -> Result<Vec<Tag>> {
         let mut fields = vec![];
         let mut data_offsets: HashMap<u32, (u16, TagDatatype, usize)> = HashMap::new();
-        let num_fields = try_if_eof!(r.read_u16::<LittleEndian>(), "while reading num_fields");
+        let num_fields = try_if_eof!(read_u16(byte_order, r),
+                                     "while reading num_fields");
+        println!("will load {} tags", num_fields);
         *offset += 2;
         for _ in 0..num_fields {
 
             // identifies the field
             // first one seems to be "make"
-            let tag_id = try_if_eof!(r.read_u16::<LittleEndian>(),
+            let tag_id = try_if_eof!(read_u16(byte_order, r),
                                   "while reading tag");
             // the field value type
-            //let tag_type = try_if_eof!(r.read_u16::<LittleEndian>(),
-            //                           "while reading tag_type");
-            let tag_datatype = try!(TagDatatype::new(try_if_eof!(r.read_u16::<LittleEndian>(), "while reading tag_type")));
+            let tag_datatype = try!(TagDatatype::new(try_if_eof!(read_u16(byte_order, r),
+                                                     "while reading tag_type")));
             // the number of values in the field
-            let count_2 = try_if_eof!(r.read_u32::<LittleEndian>(),
+            let count_2 = try_if_eof!(read_u32(byte_order, r),
                                       "while reading count_2") as usize;
+            println!("found tag {} of type {:?} containing {} values", tag_id, tag_datatype, count_2);
 
             // next 4 bytes is either offset to value position, or the value itself, if it fits within
             // 4 bytes.
@@ -169,32 +186,28 @@ impl Tag {
             // TODO: try_or_eof these
             if type_len * count_2 > 4 {
                 // make note to read data later
-                data_offsets.insert(try!(r.read_u32::<LittleEndian>()),
+                data_offsets.insert(try!(read_u32(byte_order, r)),
                                     (tag_id, tag_datatype, count_2));
             } else {
                 // read all values now
                 let mut values_data = Vec::with_capacity(4);
                 try!(r.take(4).read_to_end(&mut values_data));
-                values_data.truncate(type_len);
-                fields.push(Tag::new(tag_id, tag_datatype, values_data));
+                values_data.truncate(type_len * count_2);
+                fields.push(Tag::new(tag_id, tag_datatype, values_data, byte_order));
             }
             *offset += 12;
         }
 
-        let first_ifd_offset = try_if_eof!(r.read_u32::<LittleEndian>(),
+        let first_ifd_offset = try_if_eof!(read_u32(byte_order, r),
                                            "while reading first_ifd_offset");
         println!("first_ifd_offset: {}", first_ifd_offset);
         *offset += 4;
 
         // read values from data section
-        println!("offsets: {:?}", data_offsets);
-        println!("offset: {:?}", offset);
         //let sorted_data_offsets: Vec<_> = data_offsets.iter().collect().sort();
         let mut sorted_data_offsets: Vec<_> = data_offsets.iter().collect();
         sorted_data_offsets.sort_by(|&(offset_a, _), &(offset_b, _)| offset_a.cmp(offset_b));
         for (data_offset, &(tag, ref tag_datatype, count)) in sorted_data_offsets {
-            println!("offset: {}", offset);
-            println!("data offset: {}", data_offset);
             let empty_space = *data_offset as i32 - *offset as i32;
             if empty_space > 0 {
                 for _ in 0..empty_space {
@@ -212,14 +225,14 @@ impl Tag {
             let mut data = Vec::with_capacity(data_len as usize);
             try!(r.take(data_len as u64).read_to_end(&mut data));
             *offset += data_len;
-            fields.push(Tag::new(tag, tag_datatype.clone(), data));
+            fields.push(Tag::new(tag, tag_datatype.clone(), data, byte_order));
         }
 
         Ok(fields)
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum ByteOrder {
     BigEndian,
     LittleEndian
@@ -233,38 +246,38 @@ struct TiffHeader {
 
 impl TiffHeader {
     fn load(r: &mut Cursor<Vec<u8>>) -> Result<TiffHeader> {
-        let byte_order = try_if_eof!(r.read_u16::<LittleEndian>(),
-                                     "while reading byte order");
-        // TODO: use specified byte order
-        let tiff_id = try_if_eof!(r.read_u16::<LittleEndian>(),
-                                  "while reading tiff_id");
-        let zeroth_ifd_offset = try_if_eof!(r.read_u32::<LittleEndian>(),
-                                     "while reading zeroth ifd offset");
+        let byte_order_id = try_if_eof!(r.read_u16::<LittleEndian>(),
+                                        "while reading byte order");
+        let byte_order = try!(match byte_order_id {
+            0x4949 => Ok(ByteOrder::LittleEndian),
+            0x4d4d => Ok(ByteOrder::BigEndian),
+            _ => Err(invalid_format!("unknown byte order id: {:x}", byte_order_id)),
+        });
+        let tiff_id = try_if_eof!(read_u16(byte_order, r),
+                                  "while reading tiff id");
+        let zeroth_ifd_offset = try_if_eof!(read_u32(byte_order, r),
+                                            "while reading zeroth IFD offset");
         match tiff_id {
             // TODO: use constant
             42 => Ok(TiffHeader {
-                byte_order: try!(match byte_order {
-                    0x4949 => Ok(ByteOrder::LittleEndian),
-                    0x4d4d => Ok(ByteOrder::BigEndian),
-                    _ => Err(invalid_format!("unknown byte order")),
-                }),
+                byte_order: byte_order,
                 zeroth_ifd_offset: zeroth_ifd_offset,
             }),
-            _ => Err(invalid_format!("unknown tiff id")),
+            _ => Err(invalid_format!("unknown tiff id: {}", tiff_id)),
         }
     }
 }
 
 impl ExifSection {
     fn load(r: &mut Cursor<Vec<u8>>) -> Result<ExifSection> {
+        // TODO: add constant for this
+        // identifier code should be "Exif\0\0"
         let mut identifier_code = [0u8; 6];
         if try!(r.read_exact_0(&mut identifier_code)) != identifier_code.len() {
             return Err(unexpected_eof!("while reading identifier code in exif segment"));
         }
-        // TODO: add constant for this
-        // identifier code should be "Exif\0\0"
         if identifier_code != [69, 120, 105, 102, 0, 0] {
-            return Err(invalid_format!("not an exif segment"));
+            return Err(invalid_format!("not an exif segment: {:?}", identifier_code));
         }
 
         let tiff_header = try!(TiffHeader::load(r));
@@ -277,7 +290,7 @@ impl ExifSection {
 
         // 0th image file directory (IFD)
 
-        let fields = try!(Tag::load_all(r, &mut offset));
+        let fields = try!(Tag::load_all(r, &mut offset, tiff_header.byte_order));
         println!("fields: {:?}", fields);
 
         // TODO: handle other IFDs
@@ -328,21 +341,29 @@ impl LoadableMetadata for Metadata {
                     let h = try_if_eof!(segment.read_u16::<BigEndian>(), "when reading height");
                     let w = try_if_eof!(segment.read_u16::<BigEndian>(), "when reading width");
                     dimensions = Some((w, h));
+                    println!("dimensions: {:?}", dimensions);
                 }
                 0xe1 => {  // APP1 segment (sometimes exif)
                     println!("found exif");
 
                     // TODO: remove unwrap
-                    let exif_section = ExifSection::load(&mut segment).unwrap();
-                    for ifd_field in exif_section.zeroth_ifd {
-                        match ifd_field.id {
-                            0x112 => { orientation = Orientation::new(try!(ifd_field.get_short())); },
-                            306 => { date_time = Some(try!(ifd_field.get_ascii())); },
-                            271 => { make = Some(try!(ifd_field.get_ascii())); },
-                            272 => { model = Some(try!(ifd_field.get_ascii())); },
-                            x => { println!("unknown tag id: {}", x); }
-                        }
+                    let exif_section = ExifSection::load(&mut segment);
+                    match exif_section {
+                        Ok(exif_section) => {
+                            for ifd_field in exif_section.zeroth_ifd {
+                                match ifd_field.id {
+                                    0x112 => { orientation = Orientation::new(try!(ifd_field.get_short())); },
+                                    306 => { date_time = Some(try!(ifd_field.get_ascii())); },
+                                    271 => { make = Some(try!(ifd_field.get_ascii())); },
+                                    272 => { model = Some(try!(ifd_field.get_ascii())); },
+                                    x => { println!("unknown tag id: {}", x); }
+                                };
 
+                            }
+                        }
+                        Err(e) => {
+                            println!("skipping invalid exif section: {}", e);
+                        }
                     }
                 }
                 0xd9 => {  // end of image

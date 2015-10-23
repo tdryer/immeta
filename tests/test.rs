@@ -32,8 +32,8 @@ fn test_jpeg() {
 }
 
 #[test]
-fn test_jpeg_exif() {
-    let md = immeta::load_from_file("tests/images/flower.jpg").unwrap();
+fn test_jpeg_exif_little_endian() {
+    let md = immeta::load_from_file("tests/images/jpeg_exif_little_endian.jpg").unwrap();
     assert_eq!(md.mime_type(), "image/jpeg");
     let md = md.into::<Jpeg>().ok().expect("not JPEG metadata");
     assert_eq!(md.dimensions, Dimensions { width: 480, height: 360 });
@@ -41,6 +41,18 @@ fn test_jpeg_exif() {
     assert_eq!(md.date_time, Some("2003:12:14 12:01:44".to_string()));
     assert_eq!(md.make, Some("Canon".to_string()));
     assert_eq!(md.model, Some("Canon PowerShot S40".to_string()));
+}
+
+#[test]
+fn test_jpeg_exif_big_endian() {
+    let md = immeta::load_from_file("tests/images/jpeg_exif_big_endian.jpg").unwrap();
+    assert_eq!(md.mime_type(), "image/jpeg");
+    let md = md.into::<Jpeg>().ok().expect("not JPEG metadata");
+    assert_eq!(md.dimensions, Dimensions { width: 32, height: 24 });
+    assert_eq!(md.orientation, jpeg::Orientation::Normal);
+    assert_eq!(md.date_time, Some("2015:10:18 21:16:24".to_string()));
+    assert_eq!(md.make, Some("LGE".to_string()));
+    assert_eq!(md.model, Some("Nexus 4".to_string()));
 }
 
 #[test]
