@@ -16,6 +16,10 @@ use types::{Result, Dimensions};
 use traits::LoadableMetadata;
 use utils::{ReadExt, BufReadExt};
 
+// identifier code should be "Exif\0\0"
+const EXIF_IDENTIFIER: [u8; 6] = [69, 120, 105, 102, 0, 0];
+const TIFF_IDENTIFIER: u16 = 42;
+
 fn read_u16<R: Read>(byte_order: ByteOrder, buf: &mut R) -> byteorder::Result<u16> {
     match byte_order {
         ByteOrder::LittleEndian => buf.read_u16::<LittleEndian>(),
@@ -160,6 +164,7 @@ impl Tag {
     fn load_all(r: &mut Cursor<Vec<u8>>, offset: &mut usize, byte_order: ByteOrder)
             -> Result<Vec<Tag>> {
         let mut fields = vec![];
+        // TODO: use seek instead
         let mut data_offsets: HashMap<u32, (u16, TagDatatype, usize)> = HashMap::new();
         let num_fields = try_if_eof!(read_u16(byte_order, r),
                                      "while reading num_fields");
@@ -257,9 +262,9 @@ impl TiffHeader {
                                   "while reading tiff id");
         let zeroth_ifd_offset = try_if_eof!(read_u32(byte_order, r),
                                             "while reading zeroth IFD offset");
+        // Check that TIFF identifier is correct.
         match tiff_id {
-            // TODO: use constant
-            42 => Ok(TiffHeader {
+            TIFF_IDENTIFIER => Ok(TiffHeader {
                 byte_order: byte_order,
                 zeroth_ifd_offset: zeroth_ifd_offset,
             }),
@@ -275,13 +280,12 @@ impl ExifSection {
         try!(r.take(size as u64).read_to_end(&mut buffer));
         let mut r = Cursor::new(buffer);
 
-        // TODO: add constant for this
-        // identifier code should be "Exif\0\0"
+        // Check that the identifier code is correct.
         let mut identifier_code = [0u8; 6];
         if try!(r.read_exact_0(&mut identifier_code)) != identifier_code.len() {
             return Err(unexpected_eof!("while reading identifier code in exif segment"));
         }
-        if identifier_code != [69, 120, 105, 102, 0, 0] {
+        if identifier_code != EXIF_IDENTIFIER {
             return Err(invalid_format!("not an exif segment: {:?}", identifier_code));
         }
 
