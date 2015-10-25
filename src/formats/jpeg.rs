@@ -269,7 +269,12 @@ impl TiffHeader {
 }
 
 impl ExifSection {
-    fn load(r: &mut Cursor<Vec<u8>>) -> Result<ExifSection> {
+    fn load<R: Read>(r: &mut R, size: usize) -> Result<ExifSection> {
+        // Read entire segment into buffer with cursor.
+        let mut buffer = Vec::with_capacity(size as usize);
+        try!(r.take(size as u64).read_to_end(&mut buffer));
+        let mut r = Cursor::new(buffer);
+
         // TODO: add constant for this
         // identifier code should be "Exif\0\0"
         let mut identifier_code = [0u8; 6];
@@ -280,8 +285,7 @@ impl ExifSection {
             return Err(invalid_format!("not an exif segment: {:?}", identifier_code));
         }
 
-        let tiff_header = try!(TiffHeader::load(r));
-        // TODO: handle different endianness
+        let tiff_header = try!(TiffHeader::load(&mut r));
         // TODO: handle zeroth_ifd_offset
         println!("{:?}", tiff_header);
 
@@ -290,7 +294,7 @@ impl ExifSection {
 
         // 0th image file directory (IFD)
 
-        let fields = try!(Tag::load_all(r, &mut offset, tiff_header.byte_order));
+        let fields = try!(Tag::load_all(&mut r, &mut offset, tiff_header.byte_order));
         println!("fields: {:?}", fields);
 
         // TODO: handle other IFDs
@@ -309,45 +313,46 @@ impl LoadableMetadata for Metadata {
         let mut date_time = None;
         let mut make = None;
         let mut model = None;
+
+        // Read JPEG segments until the end of the image has been reached.
         loop {
+            // Read segment marker.
             if try!(r.skip_until(0xff)) == 0 {
-                println!("failed to skip until marker");
                 return Err(unexpected_eof!("when searching for a marker"));
             }
-
             let marker_type = try_if_eof!(r.read_u8(), "when reading marker type");
             if marker_type == 0 { continue; }  // skip "stuffed" byte
             println!("found marker: {:x}", marker_type);
 
+            // Read segment size.
             let has_size = match marker_type {
                 0xd0...0xd9 => false,
                 _ => true
             };
-
-            let size = if has_size {
-                try_if_eof!(r.read_u16::<BigEndian>(), "when reading marker payload size") - 2
+            let size: usize = if has_size {
+                try_if_eof!(r.read_u16::<BigEndian>(),
+                            "when reading marker payload size") as usize - 2
             } else { 0 };
 
-            // Read entire segment into buffer with cursor.
-            let mut buffer = Vec::with_capacity(size as usize);
-            try!(r.take(size as u64).read_to_end(&mut buffer));
-            let mut segment = Cursor::new(buffer);
-
+            // Read and parse segment depending on segment marker type.
             match marker_type {
                 0xc0 | 0xc2 => {  // maybe others?
                     println!("found dimensions");
                     // skip one byte
-                    let _ = try_if_eof!(segment.read_u8(), "when skipping to dimensions data");
-                    let h = try_if_eof!(segment.read_u16::<BigEndian>(), "when reading height");
-                    let w = try_if_eof!(segment.read_u16::<BigEndian>(), "when reading width");
+                    let _ = try_if_eof!(r.read_u8(), "when skipping to dimensions data");
+                    let h = try_if_eof!(r.read_u16::<BigEndian>(), "when reading height");
+                    let w = try_if_eof!(r.read_u16::<BigEndian>(), "when reading width");
                     dimensions = Some((w, h));
                     println!("dimensions: {:?}", dimensions);
+                    let skip_size = size as u64 - 5;
+                    if try!(r.skip_exact(skip_size)) != skip_size {
+                        return Err(unexpected_eof!("when reading segment"));
+                    }
                 }
                 0xe1 => {  // APP1 segment (sometimes exif)
                     println!("found exif");
 
-                    // TODO: remove unwrap
-                    let exif_section = ExifSection::load(&mut segment);
+                    let exif_section = ExifSection::load(&mut r, size);
                     match exif_section {
                         Ok(exif_section) => {
                             for ifd_field in exif_section.zeroth_ifd {
@@ -369,7 +374,12 @@ impl LoadableMetadata for Metadata {
                 0xd9 => {  // end of image
                     break;
                 }
-                _ => ()
+                _ => {
+                    let skip_size = size as u64;
+                    if try!(r.skip_exact(skip_size)) != skip_size {
+                        return Err(unexpected_eof!("when reading segment"));
+                    }
+                }
             };
         }
         Ok(Metadata {
