@@ -6,12 +6,9 @@
 // http://www.exif.org/Exif2-2.PDF
 // http://www.codeproject.com/Articles/43665/ExifLibrary-for-NET
 
-use std::io::{BufReader, Read, Cursor};
-use std::collections::HashMap;
-
+use std::io::{BufReader, Read, Cursor, Seek, SeekFrom};
 use byteorder;
 use byteorder::{ReadBytesExt, BigEndian, LittleEndian};
-
 use types::{Result, Dimensions};
 use traits::LoadableMetadata;
 use utils::{ReadExt, BufReadExt};
@@ -161,76 +158,50 @@ impl Tag {
         }
     }
 
-    fn load_all(r: &mut Cursor<Vec<u8>>, offset: &mut usize, byte_order: ByteOrder)
-            -> Result<Vec<Tag>> {
-        let mut fields = vec![];
-        // TODO: use seek instead
-        let mut data_offsets: HashMap<u32, (u16, TagDatatype, usize)> = HashMap::new();
-        let num_fields = try_if_eof!(read_u16(byte_order, r),
-                                     "while reading num_fields");
-        println!("will load {} tags", num_fields);
-        *offset += 2;
-        for _ in 0..num_fields {
+    fn load<S: Read + Seek>(r: &mut S, byte_order: ByteOrder) -> Result<Tag> {
+        let tag_id = try_if_eof!(read_u16(byte_order, r),
+                              "while reading tag");
+        let tag_datatype = try!(TagDatatype::new(
+            try_if_eof!(read_u16(byte_order, r), "while reading tag_type")
+        ));
+        // the number of values in the field
+        let count = try_if_eof!(read_u32(byte_order, r),
+                                  "while reading count") as usize;
+        println!("found tag {} of type {:?} containing {} values",
+                 tag_id, tag_datatype, count);
 
-            // identifies the field
-            // first one seems to be "make"
-            let tag_id = try_if_eof!(read_u16(byte_order, r),
-                                  "while reading tag");
-            // the field value type
-            let tag_datatype = try!(TagDatatype::new(try_if_eof!(read_u16(byte_order, r),
-                                                     "while reading tag_type")));
-            // the number of values in the field
-            let count_2 = try_if_eof!(read_u32(byte_order, r),
-                                      "while reading count_2") as usize;
-            println!("found tag {} of type {:?} containing {} values", tag_id, tag_datatype, count_2);
+        // next 4 bytes is either offset to value position, or the value
+        // itself, if it fits within 4 bytes.
+        let data_len = tag_datatype.len() * count;
 
-            // next 4 bytes is either offset to value position, or the value itself, if it fits within
-            // 4 bytes.
-            let type_len = tag_datatype.len();
+        // Read the tag data.
+        let mut data = Vec::with_capacity(data_len as usize);
+        if data_len > 4 {
+            // Read offset, seek to offset, read data, and seek back.
+            let value_offset = try_if_eof!(read_u32(byte_order, r),
+                                           "while reading value offset");
+            let old_offset = r.seek(SeekFrom::Current(0)).unwrap();
+            // TODO: do something with constant
+            r.seek(SeekFrom::Start(6 + value_offset as u64)).unwrap();
+            try!(r.take(data_len as u64).read_to_end(&mut data));
+            r.seek(SeekFrom::Start(old_offset)).unwrap();
 
-            // TODO: try_or_eof these
-            if type_len * count_2 > 4 {
-                // make note to read data later
-                data_offsets.insert(try!(read_u32(byte_order, r)),
-                                    (tag_id, tag_datatype, count_2));
-            } else {
-                // read all values now
-                let mut values_data = Vec::with_capacity(4);
-                try!(r.take(4).read_to_end(&mut values_data));
-                values_data.truncate(type_len * count_2);
-                fields.push(Tag::new(tag_id, tag_datatype, values_data, byte_order));
-            }
-            *offset += 12;
+        } else {
+            // Read data.
+            try!(r.take(data_len as u64).read_to_end(&mut data));
+            r.seek(SeekFrom::Current(4 - data_len as i64)).unwrap();
         }
 
-        let first_ifd_offset = try_if_eof!(read_u32(byte_order, r),
-                                           "while reading first_ifd_offset");
-        println!("first_ifd_offset: {}", first_ifd_offset);
-        *offset += 4;
+        Ok(Tag::new(tag_id, tag_datatype.clone(), data, byte_order))
+    }
 
-        // read values from data section
-        //let sorted_data_offsets: Vec<_> = data_offsets.iter().collect().sort();
-        let mut sorted_data_offsets: Vec<_> = data_offsets.iter().collect();
-        sorted_data_offsets.sort_by(|&(offset_a, _), &(offset_b, _)| offset_a.cmp(offset_b));
-        for (data_offset, &(tag, ref tag_datatype, count)) in sorted_data_offsets {
-            let empty_space = *data_offset as i32 - *offset as i32;
-            if empty_space > 0 {
-                for _ in 0..empty_space {
-                    try!(r.read_u8());
-                    *offset += 1;
-                }
-            } else if empty_space < 0 {
-                return Err(invalid_format!("overrun"));
-            }
-            //if *offset != *data_offset as usize {
-            //    return Err(invalid_format!("hole in data"));
-            //}
-
-            let data_len = tag_datatype.len() * count;
-            let mut data = Vec::with_capacity(data_len as usize);
-            try!(r.take(data_len as u64).read_to_end(&mut data));
-            *offset += data_len;
-            fields.push(Tag::new(tag, tag_datatype.clone(), data, byte_order));
+    fn load_all(r: &mut Cursor<Vec<u8>>, byte_order: ByteOrder)
+            -> Result<Vec<Tag>> {
+        let mut fields = vec![];
+        let num_fields = try_if_eof!(read_u16(byte_order, r),
+                                     "while reading num_fields");
+        for _ in 0..num_fields {
+            fields.push(try!(Tag::load(r, byte_order)));
         }
 
         Ok(fields)
@@ -293,12 +264,8 @@ impl ExifSection {
         // TODO: handle zeroth_ifd_offset
         println!("{:?}", tiff_header);
 
-        // Offset in bytes from the start of the TIFF header.
-        let mut offset = 8;
-
         // 0th image file directory (IFD)
-
-        let fields = try!(Tag::load_all(&mut r, &mut offset, tiff_header.byte_order));
+        let fields = try!(Tag::load_all(&mut r, tiff_header.byte_order));
         println!("fields: {:?}", fields);
 
         // TODO: handle other IFDs
@@ -361,6 +328,8 @@ impl LoadableMetadata for Metadata {
                         Ok(exif_section) => {
                             for ifd_field in exif_section.zeroth_ifd {
                                 match ifd_field.id {
+                                    // TODO: if the get_* methods fail here, the entire jpeg is
+                                    // invalid
                                     0x112 => { orientation = Orientation::new(try!(ifd_field.get_short())); },
                                     306 => { date_time = Some(try!(ifd_field.get_ascii())); },
                                     271 => { make = Some(try!(ifd_field.get_ascii())); },
