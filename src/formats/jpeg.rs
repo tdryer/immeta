@@ -181,8 +181,7 @@ impl Tag {
             let value_offset = try_if_eof!(read_u32(byte_order, r),
                                            "while reading value offset");
             let old_offset = r.seek(SeekFrom::Current(0)).unwrap();
-            // TODO: do something with constant
-            r.seek(SeekFrom::Start(6 + value_offset as u64)).unwrap();
+            r.seek(SeekFrom::Start(value_offset as u64)).unwrap();
             try!(r.take(data_len as u64).read_to_end(&mut data));
             r.seek(SeekFrom::Start(old_offset)).unwrap();
 
@@ -246,11 +245,6 @@ impl TiffHeader {
 
 impl ExifSection {
     fn load<R: Read>(r: &mut R, size: usize) -> Result<ExifSection> {
-        // Read entire segment into buffer with cursor.
-        let mut buffer = Vec::with_capacity(size as usize);
-        try!(r.take(size as u64).read_to_end(&mut buffer));
-        let mut r = Cursor::new(buffer);
-
         // Check that the identifier code is correct.
         let mut identifier_code = [0u8; 6];
         if try!(r.read_exact_0(&mut identifier_code)) != identifier_code.len() {
@@ -259,6 +253,11 @@ impl ExifSection {
         if identifier_code != EXIF_IDENTIFIER {
             return Err(invalid_format!("not an exif segment: {:?}", identifier_code));
         }
+
+        // Read entire segment into buffer with cursor.
+        let mut buffer = Vec::with_capacity(size as usize);
+        try!(r.take(size as u64).read_to_end(&mut buffer));
+        let mut r = Cursor::new(buffer);
 
         let tiff_header = try!(TiffHeader::load(&mut r));
         // TODO: handle zeroth_ifd_offset
